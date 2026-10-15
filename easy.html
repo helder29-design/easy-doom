@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEON MAZE — Retro FPS</title>
+<style>
+  :root { color-scheme: dark; --lime:#b8ff5c; --cyan:#55e7ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#090b12; color:#eaf0ff; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; display:grid; place-items:center; min-height:100vh; }
+  .wrap { width:min(100vw,1000px); padding:14px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; }
+  h1 { margin:0; font-size:clamp(20px,4vw,32px); letter-spacing:.12em; color:var(--lime); text-shadow:0 0 16px #8dff4966; }
+  .tag { color:#8d9ab7; font-size:11px; letter-spacing:.12em; }
+  .gamebox { position:relative; border:2px solid #39415a; background:#000; box-shadow:0 0 0 4px #111827,0 18px 60px #000a; }
+  canvas { display:block; width:100%; height:auto; image-rendering:pixelated; cursor:crosshair; }
+  .hud { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; padding:10px 2px; color:#b8c5e5; font-size:12px; }
+  .hud strong { color:var(--lime); }
+  .help { color:#8996b6; line-height:1.65; font-size:12px; }
+  button { background:var(--lime); color:#11170b; border:0; font:700 12px inherit; font-family:inherit; padding:10px 14px; cursor:pointer; letter-spacing:.08em; }
+  button:hover { filter:brightness(1.1); }
+  .overlay { position:absolute; inset:0; display:grid; place-items:center; background:#050812d9; text-align:center; padding:20px; }
+  .panel { max-width:440px; }
+  .panel h2 { color:var(--lime); font-size:clamp(24px,5vw,40px); margin:0 0 8px; }
+  .panel p { color:#c2cce5; line-height:1.6; font-size:13px; }
+  .hidden { display:none; }
+  @media(max-width:560px){ .wrap{padding:8px} .tag{display:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><div><h1>NEON MAZE</h1><div class="tag">A TINY ORIGINAL RETRO FPS</div></div><button id="restartTop">RESTART</button></header>
+  <div class="gamebox">
+    <canvas id="screen" width="640" height="400" aria-label="Neon Maze first person game"></canvas>
+    <div class="overlay" id="overlay">
+      <div class="panel">
+        <h2 id="overlayTitle">NEON MAZE</h2>
+        <p id="overlayText">Find the glowing exit. Clear the training bots and explore the maze.</p>
+        <button id="startBtn">CLICK TO PLAY</button>
+        <p>WASD move · Mouse look · Click / Space fire · Shift sprint · Esc pause</p>
+      </div>
+    </div>
+  </div>
+  <div class="hud">
+    <span>HEALTH <strong id="health">100</strong></span>
+    <span>BOT SCORE <strong id="score">0</strong></span>
+    <span>AMMO <strong id="ammo">∞</strong></span>
+    <span>MISSION <strong id="mission">FIND EXIT</strong></span>
+  </div>
+  <div class="help">Controls: <strong>W A S D</strong> to move, mouse to turn, click or <strong>Space</strong> to fire, <strong>Shift</strong> to sprint. Reach the bright green exit tile after tagging the bots. Click the game to capture the mouse; press <strong>Esc</strong> to release it.</div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('screen'), ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height, FOV = Math.PI / 2.9;
+  const map = [
+    "1111111111111111",
+    "1000000000000001",
+    "1020010001000201",
+    "1000010001000001",
+    "1000010000000001",
+    "1000000111100001",
+    "1000000100000001",
+    "1011000100110001",
+    "1000000000000001",
+    "1000111001100001",
+    "1000000000000001",
+    "1020001000000201",
+    "1000001000000001",
+    "1000000000000001",
+    "1000000000000001",
+    "1111111111111111"
+  ];
+  let player, bots, keys = {}, zBuffer = new Array(W), running = false, ended = false;
+  let score = 0, health = 100, last = 0, shotFlash = 0, hurtFlash = 0, won = false;
+  const $ = id => document.getElementById(id);
+  const wallAt = (x,y) => {
+    const mx = Math.floor(x), my = Math.floor(y);
+    if (mx < 0 || my < 0 || my >= map.length || mx >= map[0].length) return true;
+    return map[my][mx] === '1';
+  };
+  function reset() {
+    player = {x:1.5,y:1.5,a:0.15};
+    bots = [
+      {x:7.5,y:2.5,hp:2,alive:true,phase:0},
+      {x:13.5,y:2.5,hp:2,alive:true,phase:1},
+      {x:3.5,y:11.5,hp:2,alive:true,phase:2},
+      {x:12.5,y:11.5,hp:2,alive:true,phase:3}
+    ];
+    score=0; health=100; shotFlash=0; hurtFlash=0; ended=false; won=false;
+    $('health').textContent=health; $('score').textContent=score; $('mission').textContent='FIND EXIT';
+    $('overlayTitle').textContent='NEON MAZE';
+    $('overlayText').textContent='Find the glowing exit. Clear the training bots and explore the maze.';
+    $('startBtn').textContent='CLICK TO PLAY';
+    $('overlay').classList.remove('hidden');
+    render();
+  }
+  function castRay(angle) {
+    const sin=Math.sin(angle), cos=Math.cos(angle);
+    let d=0, hit='1', side=0;
+    // Small steps keep the raycaster simple and reliable.
+    while (d < 22) {
+      d += 0.025;
+      const x=player.x+cos*d, y=player.y+sin*d;
+      if (wallAt(x,y)) { hit=map[Math.floor(y)]?.[Math.floor(x)] || '1'; side=Math.abs((x%1)-.5)>Math.abs((y%1)-.5)?1:0; break; }
+    }
+    return {d,hit,side};
+  }
+  function drawWorld() {
+    const sky=ctx.createLinearGradient(0,0,0,H/2);
+    sky.addColorStop(0,'#090d22'); sky.addColorStop(1,'#263252');
+    ctx.fillStyle=sky; ctx.fillRect(0,0,W,H/2);
+    const floor=ctx.createLinearGradient(0,H/2,0,H);
+    floor.addColorStop(0,'#25243b'); floor.addColorStop(1,'#080a12');
+    ctx.fillStyle=floor; ctx.fillRect(0,H/2,W,H/2);
+    // Distant neon horizon grid
+    ctx.strokeStyle='#53668b55'; ctx.lineWidth=1;
+    for(let i=1;i<9;i++){ let y=H/2 + i*i*2.5; ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke(); }
+    for(let x=-W;x<W*2;x+=55){ctx.beginPath();ctx.moveTo(W/2,H/2);ctx.lineTo(x,H);ctx.stroke();}
+    for(let x=0;x<W;x++){
+      const a=player.a+(x/W-.5)*FOV, r=castRay(a);
+      const corrected=r.d*Math.cos(a-player.a); zBuffer[x]=corrected;
+      const height=Math.min(H*1.5,H/(corrected||.01));
+      const top=(H-height)/2;
+      let base = r.hit==='2' ? [35,210,180] : [104,119,161];
+      const shade=Math.max(.18,1-corrected/13)*(r.side?.72:1);
+      const stripe=(Math.floor(x/5)%2===0)?.9:1;
+      ctx.fillStyle=`rgb(${base.map(v=>Math.floor(v*shade*stripe)).join(',')})`;
+      ctx.fillRect(x,top,1,height);
+      if (height>25 && x%7===0) { ctx.fillStyle='#d9e7ff22';ctx.fillRect(x,top,1,Math.min(height,3)); }
+    }
+  }
+  function drawBots() {
+    const visible=bots.filter(b=>b.alive).map(b=>{
+      let dx=b.x-player.x,dy=b.y-player.y;
+      let angle=Math.atan2(dy,dx)-player.a;
+      while(angle < -Math.PI) angle+=Math.PI*2;
+      while(angle > Math.PI) angle-=Math.PI*2;
+      return {...b,dist:Math.hypot(dx,dy),angle};
+    }).sort((a,b)=>b.dist-a.dist);
+    for(const b of visible){
+      if(Math.abs(b.angle)>FOV/2+.2) continue;
+      const sx=(.5+b.angle/FOV)*W, size=Math.min(H*1.1,H/(b.dist*.9));
+      const col=Math.floor(sx);
+      if(col>=0&&col<W&&b.dist>zBuffer[col]+.15) continue;
+      const y=H/2-size*.48, x=sx-size*.28;
+      // Cute pixel-style training bot sprite, no external assets.
+      ctx.fillStyle='#111827';ctx.fillRect(x+size*.08,y+size*.2,size*.45,size*.55);
+      ctx.fillStyle='#f15b6c';ctx.fillRect(x+size*.13,y+size*.14,size*.35,size*.24);
+      ctx.fillStyle='#ffb2ba';ctx.fillRect(x+size*.17,y+size*.2,size*.07,size*.06);ctx.fillRect(x+size*.35,y+size*.2,size*.07,size*.06);
+      ctx.fillStyle='#ffdf70';ctx.fillRect(x+size*.2,y+size*.43,size*.22,size*.07);
+      ctx.fillStyle='#4a5573';ctx.fillRect(x+size*.02,y+size*.67,size*.18,size*.2);ctx.fillRect(x+size*.4,y+size*.67,size*.18,size*.2);
+      ctx.fillStyle='#e8f0ff';ctx.fillRect(x+size*.12,y+size*.03,size*.38,Math.max(2,size*.045));
+      ctx.fillStyle='#192033';ctx.fillRect(x+size*.12,y-size*.08,size*.38,Math.max(3,size*.06));
+      ctx.fillStyle='#b8ff5c';ctx.fillRect(x+size*.12,y-size*.08,size*.38*(b.hp/2),Math.max(3,size*.06));
+    }
+  }
+  function drawWeapon() {
+    const bob=Math.sin(performance.now()/120)*(Object.values(keys).some(Boolean)?4:1);
+    ctx.fillStyle='#101727';ctx.fillRect(W/2-42,H-70+bob,84,70);
+    ctx.fillStyle='#465574';ctx.fillRect(W/2-27,H-82+bob,54,55);
+    ctx.fillStyle='#b8ff5c';ctx.fillRect(W/2-10,H-91+bob,20,25);
+    ctx.fillStyle='#1d2b3e';ctx.fillRect(W/2-17,H-80+bob,34,48);
+    if(shotFlash>0){
+      ctx.fillStyle='#fff6a8';ctx.beginPath();ctx.moveTo(W/2,H-105+bob);ctx.lineTo(W/2-20,H-76+bob);ctx.lineTo(W/2,H-83+bob);ctx.lineTo(W/2+20,H-76+bob);ctx.closePath();ctx.fill();
+    }
+    // Crosshair
+    ctx.strokeStyle='#d9f8ff';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(W/2-8,H/2);ctx.lineTo(W/2-3,H/2);ctx.moveTo(W/2+3,H/2);ctx.lineTo(W/2+8,H/2);ctx.moveTo(W/2,H/2-8);ctx.lineTo(W/2,H/2-3);ctx.moveTo(W/2,H/2+3);ctx.lineTo(W/2,H/2+8);ctx.stroke();
+  }
+  function render() {
+    drawWorld(); drawBots(); drawWeapon();
+    if(hurtFlash>0){ctx.fillStyle=`rgba(255,35,70,${hurtFlash*.28})`;ctx.fillRect(0,0,W,H);}
+    if(shotFlash>0) shotFlash=Math.max(0,shotFlash-.09);
+    if(hurtFlash>0) hurtFlash=Math.max(0,hurtFlash-.035);
+  }
+  function shoot() {
+    if(!running||ended)return;
+    shotFlash=.9;
+    let target=null,best=999;
+    for(const b of bots){
+      if(!b.alive)continue;
+      const dx=b.x-player.x,dy=b.y-player.y,dist=Math.hypot(dx,dy);
+      let a=Math.atan2(dy,dx)-player.a;
+      while(a < -Math.PI)a+=Math.PI*2; while(a>Math.PI)a-=Math.PI*2;
+      if(Math.abs(a)<.11 && dist<best){
+        // Check that a wall isn't between the player and bot.
+        const ray=castRay(Math.atan2(dy,dx));
+        if(ray.d>dist-.25){target=b;best=dist;}
+      }
+    }
+    if(target){target.hp--; if(target.hp<=0){target.alive=false;score+=100;$('score').textContent=score;}}
+  }
+  function finish(win) {
+    running=false;ended=true;won=win;
+    $('overlayTitle').textContent=win?'EXIT FOUND!':'SYSTEM OFFLINE';
+    $('overlayText').textContent=win?'Nice run! You cleared the maze. Press restart to play again.':'Your health ran out. Restart and try another route.';
+    $('startBtn').textContent='PLAY AGAIN';$('overlay').classList.remove('hidden');
+  }
+  function update(dt) {
+    if(!running||ended)return;
+    const speed=(keys.Shift?3.2:2.15)*dt;
+    let move=0,strafe=0;
+    if(keys.KeyW||keys.ArrowUp)move++;if(keys.KeyS||keys.ArrowDown)move--;
+    if(keys.KeyD)strafe++;if(keys.KeyA)strafe--;
+    const dx=(Math.cos(player.a)*move-Math.sin(player.a)*strafe)*speed;
+    const dy=(Math.sin(player.a)*move+Math.cos(player.a)*strafe)*speed;
+    if(!wallAt(player.x+dx*2,player.y))player.x+=dx;
+    if(!wallAt(player.x,player.y+dy*2))player.y+=dy;
+    for(const b of bots){
+      if(!b.alive)continue;
+      b.phase+=dt;
+      const d=Math.hypot(b.x-player.x,b.y-player.y);
+      if(d<.65){health-=12*dt;hurtFlash=.6;$('health').textContent=Math.max(0,Math.floor(health));}
+      // Bots shuffle slowly within their own area.
+      const nx=b.x+Math.cos(b.phase*.65+b.phase)*dt*.16;
+      const ny=b.y+Math.sin(b.phase*.7)*dt*.16;
+      if(!wallAt(nx,b.y))b.x=nx;if(!wallAt(b.x,ny))b.y=ny;
+    }
+    if(health<=0){finish(false);return;}
+    if(Math.floor(player.x)===14&&Math.floor(player.y)===13){finish(true);return;}
+    $('mission').textContent=bots.every(b=>!b.alive)?'EXIT UNLOCKED':'BOTS LEFT '+bots.filter(b=>b.alive).length;
+  }
+  function loop(t) {
+    const dt=Math.min(.05,(t-last)/1000||0);last=t;
+    update(dt);render();requestAnimationFrame(loop);
+  }
+  function begin() {
+    if(ended)reset();
+    running=true;$('overlay').classList.add('hidden');
+    canvas.requestPointerLock?.();
+  }
+  $('startBtn').addEventListener('click',begin);
+  $('restartTop').addEventListener('click',()=>{reset();running=true;$('overlay').classList.add('hidden');canvas.requestPointerLock?.();});
+  canvas.addEventListener('click',()=>{if(!running){begin();return;} if(document.pointerLockElement!==canvas)canvas.requestPointerLock?.(); else shoot();});
+  document.addEventListener('pointerlockchange',()=>{if(document.pointerLockElement!==canvas&&running){running=false;$('overlayTitle').textContent='PAUSED';$('overlayText').textContent='Click resume to keep exploring.';$('startBtn').textContent='RESUME';$('overlay').classList.remove('hidden');}});
+  document.addEventListener('mousemove',e=>{if(running&&document.pointerLockElement===canvas)player.a+=e.movementX*.0025;});
+  document.addEventListener('keydown',e=>{
+    keys[e.code]=true;
+    if(['Space','ArrowUp','ArrowDown'].includes(e.code))e.preventDefault();
+    if(e.code==='Space'&&!e.repeat)shoot();
+    if(e.code==='Escape'&&running){running=false;}
+  });
+  document.addEventListener('keyup',e=>keys[e.code]=false);
+  reset();requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
